@@ -208,6 +208,7 @@ def upload_file():
     file_path = None
     conn = None
     cursor = None
+    weaviate_client = None
     
     if 'file' not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
@@ -233,7 +234,7 @@ def upload_file():
             return jsonify({"error": f"File processing error: {str(e)}"}), 500
 
         chunks = chunk_text(text)
-        BATCH_SIZE = 3  # Smaller batch size to prevent memory issues
+        BATCH_SIZE = 2  # Very small batch size to prevent memory issues
         total_chunks = len(chunks)
         
         conn = get_mysql_connection()
@@ -243,6 +244,7 @@ def upload_file():
         cursor = conn.cursor()
         
         try:
+            # Create document record first
             cursor.execute(
                 "INSERT INTO documents (filename, file_type) VALUES (%s, %s)",
                 (filename, os.path.splitext(filename)[1])
@@ -251,54 +253,63 @@ def upload_file():
             conn.commit()
 
             success_count = 0
-            for i in range(0, total_chunks, BATCH_SIZE):
-                batch_chunks = chunks[i:i + BATCH_SIZE]
-                try:
-                    batch_vectors = embeddings.embed_documents(batch_chunks)
+            weaviate_client = get_weaviate_client()
+            
+            try:
+                collection = weaviate_client.collections.get("DocumentChunks")
+                
+                # Process chunks in small batches
+                for i in range(0, total_chunks, BATCH_SIZE):
+                    batch_chunks = chunks[i:i + BATCH_SIZE]
                     
-                    with get_weaviate_client() as weaviate_client:
-                        try:
-                            collection = weaviate_client.collections.get("DocumentChunks")
+                    try:
+                        # Generate embeddings for current batch
+                        batch_vectors = embeddings.embed_documents(batch_chunks)
+                        
+                        # Process each chunk in the batch
+                        for j, (chunk, vector) in enumerate(zip(batch_chunks, batch_vectors)):
+                            chunk_index = i + j
                             
-                            for j, (chunk, vector) in enumerate(zip(batch_chunks, batch_vectors)):
-                                chunk_index = i + j
-                                try:
-                                    # Insert into Weaviate
-                                    collection.data.insert(
-                                        properties={
-                                            "document_id": str(document_id),
-                                            "chunk": chunk,
-                                            "chunk_index": chunk_index
-                                        },
-                                        vector=vector
-                                    )
+                            try:
+                                # Insert into Weaviate
+                                collection.data.insert(
+                                    properties={
+                                        "document_id": str(document_id),
+                                        "chunk": chunk,
+                                        "chunk_index": chunk_index
+                                    },
+                                    vector=vector
+                                )
 
-                                    # Insert into MySQL
-                                    cursor.execute(
-                                        "INSERT INTO document_chunks (document_id, chunk_text, chunk_index) VALUES (%s, %s, %s)",
-                                        (document_id, chunk, chunk_index)
-                                    )
-                                    conn.commit()
-                                    success_count += 1
-                                except Exception as chunk_error:
-                                    print(f"Error processing chunk {chunk_index}: {str(chunk_error)}")
-                                    continue
-                        finally:
-                            if hasattr(collection, 'close'):
-                                collection.close()
-                except Exception as batch_error:
-                    print(f"Error processing batch starting at chunk {i}: {str(batch_error)}")
-                    continue
+                                # Insert into MySQL
+                                cursor.execute(
+                                    "INSERT INTO document_chunks (document_id, chunk_text, chunk_index) VALUES (%s, %s, %s)",
+                                    (document_id, chunk, chunk_index)
+                                )
+                                conn.commit()
+                                success_count += 1
+                                
+                            except Exception as chunk_error:
+                                print(f"Error processing chunk {chunk_index}: {str(chunk_error)}")
+                                continue
+                            
+                    except Exception as batch_error:
+                        print(f"Error processing batch starting at chunk {i}: {str(batch_error)}")
+                        continue
 
-            if success_count == 0:
-                raise Exception("Failed to process any chunks")
+                if success_count == 0:
+                    raise Exception("Failed to process any chunks")
 
-            return jsonify({
-                "message": "File processed successfully",
-                "document_id": document_id,
-                "chunks_processed": success_count,
-                "total_chunks": total_chunks
-            })
+                return jsonify({
+                    "message": "File processed successfully",
+                    "document_id": document_id,
+                    "chunks_processed": success_count,
+                    "total_chunks": total_chunks
+                })
+
+            finally:
+                if weaviate_client:
+                    weaviate_client.close()
 
         except Exception as e:
             if conn:
@@ -307,8 +318,9 @@ def upload_file():
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+        
     finally:
-        # Clean up resources
+        # Clean up all resources
         if cursor:
             try:
                 cursor.close()
