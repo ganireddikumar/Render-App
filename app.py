@@ -57,6 +57,7 @@ llm = Together(
 )
 
 # MySQL connection helper
+# MySQL connection helper
 def get_mysql_connection():
     try:
         # Get CA cert from environment variable
@@ -68,11 +69,11 @@ def get_mysql_connection():
             temp_cert.write(ca_cert)
             temp_cert_path = temp_cert.name
 
-        # Create SSL configuration
+        # Updated SSL configuration
         ssl_config = {
-            'ssl_mode': 'VERIFY_IDENTITY',
             'ssl': {
-                'ca': temp_cert_path
+                'ca': temp_cert_path,
+                'verify_cert': True
             }
         }
         
