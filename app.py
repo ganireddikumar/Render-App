@@ -46,16 +46,29 @@ def get_weaviate_client():
     )
 
 # MySQL connection helper
+# MySQL connection helper
 def get_mysql_connection():
     try:
+        # Write certificate to a temporary file
+        ca_cert = os.getenv('TIDB_CA_CERT')
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pem') as temp_cert:
+            temp_cert.write(ca_cert)
+            temp_cert_path = temp_cert.name
+
+        # Create connection with SSL
         conn = mysql.connector.connect(
             host=os.getenv('MYSQL_HOST'),
             port=int(os.getenv('MYSQL_PORT')),
             user=os.getenv('MYSQL_USER'),
             password=os.getenv('MYSQL_PASSWORD'),
             database=os.getenv('MYSQL_DB'),
-            ssl_ca=os.getenv('TIDB_CA_CERT')  # Simplified SSL config
+            ssl={'ca': temp_cert_path}  # Changed SSL configuration
         )
+        
+        # Clean up the temporary file
+        os.unlink(temp_cert_path)
+        
         return conn
     except Error as e:
         print(f"MySQL Error: {e}")
