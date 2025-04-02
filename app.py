@@ -206,6 +206,9 @@ def initialize_database():
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
     file_path = None
+    conn = None
+    cursor = None
+    weaviate_client = None
     
     if 'file' not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
@@ -231,7 +234,6 @@ def upload_file():
             return jsonify({"error": f"File processing error: {str(e)}"}), 500
 
         chunks = chunk_text(text)
-        
         BATCH_SIZE = 10
         total_chunks = len(chunks)
         
@@ -240,7 +242,7 @@ def upload_file():
             return jsonify({"error": "Database connection failed"}), 500
             
         cursor = conn.cursor()
-        weaviate_client = None
+        
         try:
             cursor.execute(
                 "INSERT INTO documents (filename, file_type) VALUES (%s, %s)",
@@ -252,9 +254,10 @@ def upload_file():
                 batch_chunks = chunks[i:i + BATCH_SIZE]
                 batch_vectors = embeddings.embed_documents(batch_chunks)
                 
-                weaviate_client = get_weaviate_client()
-                with weaviate_client:
+                with get_weaviate_client() as weaviate_client:
                     collection = weaviate_client.collections.get("DocumentChunks")
+                    
+                    # Process batch in a single transaction
                     for j, (chunk, vector) in enumerate(zip(batch_chunks, batch_vectors)):
                         chunk_index = i + j
                         collection.data.insert(
@@ -266,17 +269,12 @@ def upload_file():
                             vector=vector
                         )
 
-                    for j, chunk in enumerate(batch_chunks):
-                        chunk_index = i + j
                         cursor.execute(
                             "INSERT INTO document_chunks (document_id, chunk_text, chunk_index) VALUES (%s, %s, %s)",
                             (document_id, chunk, chunk_index)
                         )
                     
                     conn.commit()
-                
-                if weaviate_client:
-                    weaviate_client.close()
 
             return jsonify({
                 "message": "File processed successfully",
@@ -285,23 +283,23 @@ def upload_file():
             })
 
         except Exception as e:
-            conn.rollback()
-            return jsonify({"error": str(e)}), 500
-        finally:
-            cursor.close()
-            conn.close()
-            if weaviate_client:
-                weaviate_client.close()
+            if conn:
+                conn.rollback()
+            raise
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
         if file_path and os.path.exists(file_path):
             try:
                 os.remove(file_path)
             except:
                 pass
-
+                
 @app.route('/api/chat', methods=['POST'])
 def chat():
     data = request.get_json()
