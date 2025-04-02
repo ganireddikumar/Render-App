@@ -22,6 +22,18 @@ from docx import Document
 # Load environment variables
 load_dotenv()
 
+embeddings = TogetherEmbeddings(
+    model="togethercomputer/m2-bert-80M-8k-base",
+    api_key=os.getenv('TOGETHER_API_KEY')
+)
+
+llm = Together(
+    model="mistralai/Mixtral-8x7B-Instruct-v0.1",
+    temperature=0.7,
+    max_tokens=1024,
+    api_key=os.getenv('TOGETHER_API_KEY')
+)
+
 app = Flask(__name__)
 # Allow all origins temporarily for initial deployment
 CORS(app, resources={
@@ -103,7 +115,45 @@ def process_docx(file_path):
         print(f"Error processing DOCX: {e}")
         raise Exception("Failed to process DOCX file")
 
-# Update the upload endpoint
+# Update the upload endpoin
+
+def chunk_text(text):
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=1000,
+        chunk_overlap=200,
+        length_function=len
+    )
+    return splitter.split_text(text)
+
+# Weaviate schema setup
+def initialize_weaviate_schema():
+    with weaviate_client:
+        if not weaviate_client.collections.exists("DocumentChunks"):
+            weaviate_client.collections.create(
+                name="DocumentChunks",
+                properties=[
+                    {
+                        "name": "document_id",
+                        "data_type": DataType.TEXT,
+                        "description": "The document identifier"
+                    },
+                    {
+                        "name": "chunk",
+                        "data_type": DataType.TEXT,
+                        "description": "The text chunk content"
+                    },
+                    {
+                        "name": "chunk_index",
+                        "data_type": DataType.INT,
+                        "description": "The index of the chunk in the document"
+                    }
+                ],
+                vectorizer_config=None,
+                description="Collection for storing document chunks"
+            )
+
+# API Endpoints
+# Keep only this implementation of the upload endpoint
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
     if 'file' not in request.files:
@@ -198,121 +248,14 @@ def upload_file():
             except:
                 pass
 
-def chunk_text(text):
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200,
-        length_function=len
-    )
-    return splitter.split_text(text)
+
 
 # Weaviate schema setup
-def initialize_weaviate_schema():
-    with weaviate_client:
-        if not weaviate_client.collections.exists("DocumentChunks"):
-            weaviate_client.collections.create(
-                name="DocumentChunks",
-                properties=[
-                    {
-                        "name": "document_id",
-                        "data_type": DataType.TEXT,
-                        "description": "The document identifier"
-                    },
-                    {
-                        "name": "chunk",
-                        "data_type": DataType.TEXT,
-                        "description": "The text chunk content"
-                    },
-                    {
-                        "name": "chunk_index",
-                        "data_type": DataType.INT,
-                        "description": "The index of the chunk in the document"
-                    }
-                ],
-                vectorizer_config=None,
-                description="Collection for storing document chunks"
-            )
+
 
 # API Endpoints
-@app.route('/api/upload', methods=['POST'])
-def upload_file():
-    if 'file' not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
-    
-    file = request.files['file']
-    if not file.filename:
-        return jsonify({"error": "Empty filename"}), 400
+# Keep this first upload endpoint
 
-    if not file.filename.lower().endswith(('.pdf', '.docx')):
-        return jsonify({"error": "Invalid file type"}), 400
-
-    try:
-        # Save file
-        filename = secure_filename(file.filename)
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        file.save(file_path)
-
-        # Process document
-        if filename.endswith('.pdf'):
-            text = process_pdf(file_path)
-        else:
-            text = process_docx(file_path)
-
-        # Chunk text
-        chunks = chunk_text(text)
-
-        # Store in MySQL
-        conn = get_mysql_connection()
-        if not conn:
-            return jsonify({"error": "Database connection failed"}), 500
-            
-        cursor = conn.cursor()
-        try:
-            # Insert document record
-            cursor.execute(
-                "INSERT INTO documents (filename, file_type) VALUES (%s, %s)",
-                (filename, os.path.splitext(filename)[1])
-            )
-            document_id = cursor.lastrowid
-
-            # Generate embeddings and store in Weaviate
-            vectors = embeddings.embed_documents(chunks)
-            
-            with weaviate_client:
-                collection = weaviate_client.collections.get("DocumentChunks")
-                for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
-                    collection.data.insert(
-                        properties={
-                            "document_id": str(document_id),
-                            "chunk": chunk,
-                            "chunk_index": i
-                        },
-                        vector=vector
-                    )
-
-            # Store chunks in MySQL
-            for i, chunk in enumerate(chunks):
-                cursor.execute(
-                    "INSERT INTO document_chunks (document_id, chunk_text, chunk_index) VALUES (%s, %s, %s)",
-                    (document_id, chunk, i)
-                )
-            
-            conn.commit()
-            return jsonify({
-                "message": "File processed successfully",
-                "document_id": document_id,
-                "chunk_count": len(chunks)
-            })
-
-        except Exception as e:
-            conn.rollback()
-            return jsonify({"error": str(e)}), 500
-        finally:
-            cursor.close()
-            conn.close()
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
 
 from flask import session
 from datetime import datetime
@@ -345,63 +288,63 @@ def chat():
             # Sort chunks by index to maintain document flow
             sorted_chunks = sorted(response.objects, key=lambda x: x.properties["chunk_index"])
 
-        # Extract context from sorted chunks
-        context = "\n\n".join([obj.properties["chunk"] for obj in sorted_chunks])
-        
-        # If no relevant context found
-        if not context.strip():
-            return jsonify({"answer": "I don't have enough information to answer that question."})
+            # Extract context from sorted chunks
+            context = "\n\n".join([obj.properties["chunk"] for obj in sorted_chunks])
+            
+            # If no relevant context found
+            if not context.strip():
+                return jsonify({"answer": "I don't have enough information to answer that question."})
 
-        # Generate response using Together.ai
-        prompt = f"""You are a helpful AI assistant analyzing a document. Use the provided context to answer the question thoroughly and accurately. 
-    
-        Context: {context}
-    
-        Question: {data['question']}
+            # Generate response using Together.ai
+            prompt = f"""You are a helpful AI assistant analyzing a document. Use the provided context to answer the question thoroughly and accurately. 
         
-        Instructions:
-        1. Use the information from the provided context to answer the question
-        2. If you can make a reasonable inference from the context, you may do so while indicating it's an inference
-        3. If the context is partially relevant, provide what information you can and explain what's missing
-        4. Only say "I don't have enough information" if the context is completely unrelated to the question
-        5. Keep your answer clear and well-structured
+            Context: {context}
         
-        Answer: """
-        
-        answer = llm(prompt)
+            Question: {data['question']}
+            
+            Instructions:
+            1. Use the information from the provided context to answer the question
+            2. If you can make a reasonable inference from the context, you may do so while indicating it's an inference
+            3. If the context is partially relevant, provide what information you can and explain what's missing
+            4. Only say "I don't have enough information" if the context is completely unrelated to the question
+            5. Keep your answer clear and well-structured
+            
+            Answer: """
+            
+            answer = llm(prompt)
 
-        # Store conversation
-        conn = get_mysql_connection()
-        if conn:
-            cursor = conn.cursor()
-            try:
-                cursor.execute(
-                    "INSERT INTO conversations (document_id, question, answer) VALUES (%s, %s, %s)",
-                    (data['document_id'], data['question'], answer)
-                )
-                conn.commit()
-            except Exception as e:
-                print(f"Error storing conversation: {str(e)}")
-            finally:
-                cursor.close()
-                conn.close()
+            # Store conversation
+            conn = get_mysql_connection()
+            if conn:
+                cursor = conn.cursor()
+                try:
+                    cursor.execute(
+                        "INSERT INTO conversations (document_id, question, answer) VALUES (%s, %s, %s)",
+                        (data['document_id'], data['question'], answer)
+                    )
+                    conn.commit()
+                except Exception as e:
+                    print(f"Error storing conversation: {str(e)}")
+                finally:
+                    cursor.close()
+                    conn.close()
 
-        # Store conversation in session
-        chat_entry = {
-            'document_id': data['document_id'],
-            'question': data['question'],
-            'answer': answer,
-            'timestamp': datetime.now().isoformat()
-        }
-        session['chat_history'].append(chat_entry)
-        
-        return jsonify({
-            "answer": answer,
-            "chat_history": session['chat_history']
-        })
+            # Store conversation in session
+            chat_entry = {
+                'document_id': data['document_id'],
+                'question': data['question'],
+                'answer': answer,
+                'timestamp': datetime.now().isoformat()
+            }
+            session['chat_history'].append(chat_entry)
+            
+            return jsonify({
+                "answer": answer,
+                "chat_history": session['chat_history']
+            })
 
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
 
 @app.route('/api/documents', methods=['GET'])
 def get_documents():
