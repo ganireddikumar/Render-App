@@ -208,7 +208,6 @@ def upload_file():
     file_path = None
     conn = None
     cursor = None
-    weaviate_client = None
     
     if 'file' not in request.files:
         return jsonify({"error": "No file uploaded"}), 400
@@ -234,7 +233,7 @@ def upload_file():
             return jsonify({"error": f"File processing error: {str(e)}"}), 500
 
         chunks = chunk_text(text)
-        BATCH_SIZE = 10
+        BATCH_SIZE = 5  # Reduced batch size
         total_chunks = len(chunks)
         
         conn = get_mysql_connection()
@@ -249,32 +248,40 @@ def upload_file():
                 (filename, os.path.splitext(filename)[1])
             )
             document_id = cursor.lastrowid
+            conn.commit()
 
             for i in range(0, total_chunks, BATCH_SIZE):
                 batch_chunks = chunks[i:i + BATCH_SIZE]
-                batch_vectors = embeddings.embed_documents(batch_chunks)
-                
-                with get_weaviate_client() as weaviate_client:
-                    collection = weaviate_client.collections.get("DocumentChunks")
+                try:
+                    batch_vectors = embeddings.embed_documents(batch_chunks)
                     
-                    # Process batch in a single transaction
-                    for j, (chunk, vector) in enumerate(zip(batch_chunks, batch_vectors)):
-                        chunk_index = i + j
-                        collection.data.insert(
-                            properties={
-                                "document_id": str(document_id),
-                                "chunk": chunk,
-                                "chunk_index": chunk_index
-                            },
-                            vector=vector
-                        )
+                    with get_weaviate_client() as weaviate_client:
+                        collection = weaviate_client.collections.get("DocumentChunks")
+                        
+                        for j, (chunk, vector) in enumerate(zip(batch_chunks, batch_vectors)):
+                            chunk_index = i + j
+                            try:
+                                collection.data.insert(
+                                    properties={
+                                        "document_id": str(document_id),
+                                        "chunk": chunk,
+                                        "chunk_index": chunk_index
+                                    },
+                                    vector=vector
+                                )
 
-                        cursor.execute(
-                            "INSERT INTO document_chunks (document_id, chunk_text, chunk_index) VALUES (%s, %s, %s)",
-                            (document_id, chunk, chunk_index)
-                        )
-                    
-                    conn.commit()
+                                cursor.execute(
+                                    "INSERT INTO document_chunks (document_id, chunk_text, chunk_index) VALUES (%s, %s, %s)",
+                                    (document_id, chunk, chunk_index)
+                                )
+                                conn.commit()
+                            except Exception as insert_error:
+                                print(f"Error inserting chunk {chunk_index}: {str(insert_error)}")
+                                continue
+
+                except Exception as batch_error:
+                    print(f"Error processing batch starting at chunk {i}: {str(batch_error)}")
+                    continue
 
             return jsonify({
                 "message": "File processed successfully",
@@ -291,9 +298,15 @@ def upload_file():
         return jsonify({"error": str(e)}), 500
     finally:
         if cursor:
-            cursor.close()
+            try:
+                cursor.close()
+            except:
+                pass
         if conn:
-            conn.close()
+            try:
+                conn.close()
+            except:
+                pass
         if file_path and os.path.exists(file_path):
             try:
                 os.remove(file_path)
