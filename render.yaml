@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: rag-backend
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 4 --timeout 120
+    envVars:
+      - key: MYSQL_HOST
+        value: gateway01.ap-southeast-1.prod.aws.tidbcloud.com
+      - key: MYSQL_PORT
+        value: 4000
+      - key: MYSQL_USER
+        value: 3jqdfp7FVivSCKx.root
+      - key: MYSQL_PASSWORD
+        sync: false
+      - key: MYSQL_DB
+        value: test
+      - key: WEAVIATE_URL
+        sync: false
+      - key: WEAVIATE_API_KEY
+        sync: false
+      - key: TOGETHER_API_KEY
+        sync: false
+      - key: TIDB_CA_CERT
+        sync: false
+      - key: FLASK_SECRET_KEY
+        value: gani
+      - key: CORS_ORIGIN
+        value: https://your-frontend-url.onrender.com
+    disk:
+      name: uploads
+      mountPath: /app/uploads
+      sizeGB: 1
+
+  - type: web
+    name: rag-frontend
+    env: static
+    buildCommand: cd frontend && npm install && npm run build
+    staticPublishPath: ./frontend/build
+    envVars:
+      - key: REACT_APP_API_URL
+        value: https://your-backend-url.onrender.com
