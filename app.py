@@ -23,7 +23,14 @@ from docx import Document
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, origins=[os.getenv('CORS_ORIGIN')])
+# Replace the current CORS line with this
+CORS(app, resources={
+    r"/*": {
+        "origins": ["http://localhost:3000", "https://rag-frontend-xxxx.onrender.com"],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type"]
+    }
+})
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
 app.secret_key = 'gani'
