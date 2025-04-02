@@ -34,15 +34,17 @@ llm = Together(
     api_key=os.getenv('TOGETHER_API_KEY')
 )
 
-app = Flask(__name__)
-# Allow all origins temporarily for initial deployment
+# Fix CORS configuration
 CORS(app, resources={
     r"/*": {
-        "origins": "*",  # Allow all origins temporarily
+        "origins": "*",
         "methods": ["GET", "POST", "OPTIONS"],
         "allow_headers": ["Content-Type"]
     }
 })
+
+# Initialize Flask app first
+app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
 app.secret_key = 'gani'
@@ -466,3 +468,4 @@ if __name__ == '__main__':
     initialize_database()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
+    
