@@ -11,8 +11,7 @@ import weaviate
 from weaviate.classes.query import Filter
 from weaviate.classes.init import Auth
 from weaviate.classes.config import Property, DataType, Configure, Tokenization
-from langchain_together import TogetherEmbeddings
-from langchain_together import Together
+from langchain_together import TogetherEmbeddings, Together
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain.chains import RetrievalQA
 from langchain_community.vectorstores import Weaviate
@@ -22,6 +21,19 @@ from docx import Document
 # Load environment variables
 load_dotenv()
 
+# Initialize Flask app
+app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
+app.secret_key = os.getenv('FLASK_SECRET_KEY', 'gani')
+
+# Configure CORS properly
+CORS(app)
+
+# Create upload directory
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+
+# Initialize embeddings and llm
 embeddings = TogetherEmbeddings(
     model="togethercomputer/m2-bert-80M-8k-base",
     api_key=os.getenv('TOGETHER_API_KEY')
@@ -34,61 +46,36 @@ llm = Together(
     api_key=os.getenv('TOGETHER_API_KEY')
 )
 
-# Fix CORS configuration
-CORS(app, resources={
-    r"/*": {
-        "origins": "*",
-        "methods": ["GET", "POST", "OPTIONS"],
-        "allow_headers": ["Content-Type"]
-    }
-})
-
-# Initialize Flask app first
-app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
-app.secret_key = 'gani'
-
-# Create upload directory
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-
-# Initialize Weaviate client
+# Helper functions
 def get_weaviate_client():
     return weaviate.connect_to_weaviate_cloud(
         cluster_url=os.getenv('WEAVIATE_URL'),
         auth_credentials=Auth.api_key(os.getenv('WEAVIATE_API_KEY'))
     )
 
-# MySQL connection helper
-# MySQL connection helper
 def get_mysql_connection():
     try:
-        # Write certificate to a temporary file
         ca_cert = os.getenv('TIDB_CA_CERT')
         import tempfile
         with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pem') as temp_cert:
             temp_cert.write(ca_cert)
             temp_cert_path = temp_cert.name
 
-        # Create connection with SSL/TLS
         conn = mysql.connector.connect(
             host=os.getenv('MYSQL_HOST'),
             port=int(os.getenv('MYSQL_PORT')),
             user=os.getenv('MYSQL_USER'),
             password=os.getenv('MYSQL_PASSWORD'),
             database=os.getenv('MYSQL_DB'),
-            ssl_ca=temp_cert_path  # Changed from ssl={'ca': temp_cert_path} to ssl_ca
+            ssl_ca=temp_cert_path
         )
         
-        # Clean up the temporary file
         os.unlink(temp_cert_path)
-        
         return conn
     except Error as e:
         print(f"MySQL Error: {e}")
         return None
 
-# Document processing functions
 def process_pdf(file_path):
     try:
         with open(file_path, 'rb') as file:
@@ -110,14 +97,12 @@ def process_docx(file_path):
         doc = Document(file_path)
         text = []
         for para in doc.paragraphs:
-            if para.text.strip():  # Only add non-empty paragraphs
+            if para.text.strip():
                 text.append(para.text)
         return "\n".join(text)
     except Exception as e:
         print(f"Error processing DOCX: {e}")
         raise Exception("Failed to process DOCX file")
-
-# Update the upload endpoin
 
 def chunk_text(text):
     splitter = RecursiveCharacterTextSplitter(
@@ -127,9 +112,8 @@ def chunk_text(text):
     )
     return splitter.split_text(text)
 
-# Weaviate schema setup
 def initialize_weaviate_schema():
-    with weaviate_client:
+    with get_weaviate_client() as weaviate_client:
         if not weaviate_client.collections.exists("DocumentChunks"):
             weaviate_client.collections.create(
                 name="DocumentChunks",
@@ -154,8 +138,55 @@ def initialize_weaviate_schema():
                 description="Collection for storing document chunks"
             )
 
+def initialize_database():
+    conn = get_mysql_connection()
+    if not conn:
+        print("Failed to connect to database")
+        return False
+
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS documents (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                filename VARCHAR(255) NOT NULL,
+                file_type VARCHAR(10) NOT NULL,
+                upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS document_chunks (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                document_id INT NOT NULL,
+                chunk_text TEXT NOT NULL,
+                chunk_index INT NOT NULL,
+                FOREIGN KEY (document_id) REFERENCES documents(id)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                document_id INT NOT NULL,
+                question TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (document_id) REFERENCES documents(id)
+            )
+        """)
+        
+        conn.commit()
+        print("Database initialized successfully")
+        return True
+    except Error as e:
+        print(f"Error initializing database: {e}")
+        return False
+    finally:
+        cursor.close()
+        conn.close()
+
 # API Endpoints
-# Keep only this implementation of the upload endpoint
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
     if 'file' not in request.files:
@@ -169,12 +200,10 @@ def upload_file():
         return jsonify({"error": "Invalid file type"}), 400
 
     try:
-        # Save file
         filename = secure_filename(file.filename)
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(file_path)
 
-        # Process document
         try:
             if filename.lower().endswith('.pdf'):
                 text = process_pdf(file_path)
@@ -183,10 +212,8 @@ def upload_file():
         except Exception as e:
             return jsonify({"error": f"File processing error: {str(e)}"}), 500
 
-        # Chunk text
         chunks = chunk_text(text)
 
-        # Store in MySQL
         conn = get_mysql_connection()
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
@@ -194,14 +221,12 @@ def upload_file():
         cursor = conn.cursor()
         weaviate_client = None
         try:
-            # Insert document record
             cursor.execute(
                 "INSERT INTO documents (filename, file_type) VALUES (%s, %s)",
                 (filename, os.path.splitext(filename)[1])
             )
             document_id = cursor.lastrowid
 
-            # Generate embeddings and store in Weaviate
             vectors = embeddings.embed_documents(chunks)
             
             weaviate_client = get_weaviate_client()
@@ -217,7 +242,6 @@ def upload_file():
                         vector=vector
                     )
 
-            # Store chunks in MySQL
             for i, chunk in enumerate(chunks):
                 cursor.execute(
                     "INSERT INTO document_chunks (document_id, chunk_text, chunk_index) VALUES (%s, %s, %s)",
@@ -243,24 +267,11 @@ def upload_file():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
-        # Clean up uploaded file
         if os.path.exists(file_path):
             try:
                 os.remove(file_path)
             except:
                 pass
-
-
-
-# Weaviate schema setup
-
-
-# API Endpoints
-# Keep this first upload endpoint
-
-
-from flask import session
-from datetime import datetime
 
 @app.route('/api/chat', methods=['POST'])
 def chat():
@@ -268,15 +279,12 @@ def chat():
     if not data or 'question' not in data or 'document_id' not in data:
         return jsonify({"error": "Missing question or document_id"}), 400
     
-    # Initialize session if not exists
     if 'chat_history' not in session:
         session['chat_history'] = []
 
     try:
-        # Generate question embedding
         question_embedding = embeddings.embed_query(data['question'])
 
-        # Search Weaviate
         weaviate_client = get_weaviate_client()
         try:
             with weaviate_client:
@@ -289,19 +297,14 @@ def chat():
                     return_properties=["chunk", "chunk_index"]
                 )
                 
-                # Sort chunks by index to maintain document flow
                 sorted_chunks = sorted(response.objects, key=lambda x: x.properties["chunk_index"])
-
-                # Extract context from sorted chunks
                 context = "\n\n".join([obj.properties["chunk"] for obj in sorted_chunks])
         finally:
             weaviate_client.close()
             
-        # If no relevant context found
         if not context.strip():
             return jsonify({"answer": "I don't have enough information to answer that question."})
 
-        # Generate response using Together.ai
         prompt = f"""You are a helpful AI assistant analyzing a document. Use the provided context to answer the question thoroughly and accurately. 
     
         Context: {context}
@@ -319,7 +322,6 @@ def chat():
         
         answer = llm(prompt)
 
-        # Store conversation in database
         conn = get_mysql_connection()
         if conn:
             cursor = conn.cursor()
@@ -335,7 +337,6 @@ def chat():
                 cursor.close()
                 conn.close()
 
-        # Store conversation in session
         chat_entry = {
             'document_id': data['document_id'],
             'question': data['question'],
@@ -407,62 +408,6 @@ def clear_chat_history():
 def health_check():
     return jsonify({'status': 'healthy'}), 200
 
-# Add after your imports
-def initialize_database():
-    conn = get_mysql_connection()
-    if not conn:
-        print("Failed to connect to database")
-        return False
-
-    cursor = conn.cursor()
-    try:
-        # Create tables directly with SQL statements
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS documents (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                filename VARCHAR(255) NOT NULL,
-                file_type VARCHAR(10) NOT NULL,
-                upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS document_chunks (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                document_id INT NOT NULL,
-                chunk_text TEXT NOT NULL,
-                chunk_index INT NOT NULL,
-                FOREIGN KEY (document_id) REFERENCES documents(id)
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS conversations (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                document_id INT NOT NULL,
-                question TEXT NOT NULL,
-                answer TEXT NOT NULL,
-                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (document_id) REFERENCES documents(id)
-            )
-        """)
-        
-        conn.commit()
-        print("Database initialized successfully")
-        return True
-    except Error as e:
-        print(f"Error initializing database: {e}")
-        return False
-    finally:
-        cursor.close()
-        conn.close()
-
-# Add this right after creating the Flask app
-app = Flask(__name__)
-CORS(app, resources={...})  # your existing CORS setup
-initialize_database()  # Add this line
-
-# Update the main block to initialize both Weaviate and database
 if __name__ == '__main__':
     initialize_weaviate_schema()
     initialize_database()
