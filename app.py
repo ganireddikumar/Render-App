@@ -23,10 +23,10 @@ from docx import Document
 load_dotenv()
 
 app = Flask(__name__)
-# Replace the current CORS line with this
+# Allow all origins temporarily for initial deployment
 CORS(app, resources={
     r"/*": {
-        "origins": ["http://localhost:3000", "https://rag-frontend-xxxx.onrender.com"],
+        "origins": "*",  # Allow all origins temporarily
         "methods": ["GET", "POST", "OPTIONS"],
         "allow_headers": ["Content-Type"]
     }
