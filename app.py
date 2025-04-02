@@ -405,21 +405,45 @@ def clear_chat_history():
 def health_check():
     return jsonify({'status': 'healthy'}), 200
 
+# Add after your imports
 def initialize_database():
     conn = get_mysql_connection()
     if not conn:
         print("Failed to connect to database")
         return False
 
+    cursor = conn.cursor()
     try:
-        with open('schema.sql', 'r') as f:
-            sql_script = f.read()
-            
-        cursor = conn.cursor()
-        # Split and execute each statement separately
-        for statement in sql_script.split(';'):
-            if statement.strip():
-                cursor.execute(statement)
+        # Create tables directly with SQL statements
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS documents (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                filename VARCHAR(255) NOT NULL,
+                file_type VARCHAR(10) NOT NULL,
+                upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS document_chunks (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                document_id INT NOT NULL,
+                chunk_text TEXT NOT NULL,
+                chunk_index INT NOT NULL,
+                FOREIGN KEY (document_id) REFERENCES documents(id)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS conversations (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                document_id INT NOT NULL,
+                question TEXT NOT NULL,
+                answer TEXT NOT NULL,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (document_id) REFERENCES documents(id)
+            )
+        """)
         
         conn.commit()
         print("Database initialized successfully")
@@ -431,10 +455,14 @@ def initialize_database():
         cursor.close()
         conn.close()
 
+# Add this right after creating the Flask app
+app = Flask(__name__)
+CORS(app, resources={...})  # your existing CORS setup
+initialize_database()  # Add this line
+
 # Update the main block to initialize both Weaviate and database
 if __name__ == '__main__':
     initialize_weaviate_schema()
     initialize_database()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-    
