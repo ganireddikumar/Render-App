@@ -30,20 +30,36 @@ app.secret_key = os.getenv('FLASK_SECRET_KEY', 'gani')
 # Configure CORS properly
 CORS(app)
 
+
+load_dotenv()
+
+app = Flask(__name__)
+CORS(app)
+app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
+app.secret_key = 'gani'
+
+
+
 # Create upload directory
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
+# Initialize Weaviate client
+weaviate_client = weaviate.connect_to_weaviate_cloud(
+    cluster_url=os.getenv('WEAVIATE_URL'),
+    auth_credentials=Auth.api_key(os.getenv('WEAVIATE_API_KEY'))
+)
+
 # Initialize embeddings and llm
 embeddings = TogetherEmbeddings(
-    model="togethercomputer/m2-bert-80M-8k-base",
-    api_key=os.getenv('TOGETHER_API_KEY')
+    model="togethercomputer/m2-bert-80M-32k-retrieval",
+    together_api_key=os.getenv('TOGETHER_API_KEY')
 )
 
 llm = Together(
-    model="mistralai/Mixtral-8x7B-Instruct-v0.1",
-    temperature=0.7,
-    max_tokens=1024,
-    api_key=os.getenv('TOGETHER_API_KEY')
+    model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+    temperature=0.1,
+    together_api_key=os.getenv('TOGETHER_API_KEY')
 )
 
 # Helper functions
