@@ -68,14 +68,14 @@ def get_mysql_connection():
             temp_cert.write(ca_cert)
             temp_cert_path = temp_cert.name
 
-        # Create connection with SSL
+        # Create connection with SSL/TLS
         conn = mysql.connector.connect(
             host=os.getenv('MYSQL_HOST'),
             port=int(os.getenv('MYSQL_PORT')),
             user=os.getenv('MYSQL_USER'),
             password=os.getenv('MYSQL_PASSWORD'),
             database=os.getenv('MYSQL_DB'),
-            ssl={'ca': temp_cert_path}  # Changed SSL configuration
+            ssl_ca=temp_cert_path  # Changed from ssl={'ca': temp_cert_path} to ssl_ca
         )
         
         # Clean up the temporary file
