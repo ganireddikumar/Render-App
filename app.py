@@ -405,8 +405,36 @@ def clear_chat_history():
 def health_check():
     return jsonify({'status': 'healthy'}), 200
 
+def initialize_database():
+    conn = get_mysql_connection()
+    if not conn:
+        print("Failed to connect to database")
+        return False
+
+    try:
+        with open('schema.sql', 'r') as f:
+            sql_script = f.read()
+            
+        cursor = conn.cursor()
+        # Split and execute each statement separately
+        for statement in sql_script.split(';'):
+            if statement.strip():
+                cursor.execute(statement)
+        
+        conn.commit()
+        print("Database initialized successfully")
+        return True
+    except Error as e:
+        print(f"Error initializing database: {e}")
+        return False
+    finally:
+        cursor.close()
+        conn.close()
+
+# Update the main block to initialize both Weaviate and database
 if __name__ == '__main__':
     initialize_weaviate_schema()
+    initialize_database()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
     
