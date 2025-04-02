@@ -205,7 +205,17 @@ def initialize_database():
 # API Endpoints
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
-    # ... existing validation code ...
+    file_path = None
+    
+    if 'file' not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    
+    file = request.files['file']
+    if not file.filename:
+        return jsonify({"error": "Empty filename"}), 400
+
+    if not file.filename.lower().endswith(('.pdf', '.docx')):
+        return jsonify({"error": "Invalid file type"}), 400
 
     try:
         filename = secure_filename(file.filename)
@@ -222,7 +232,6 @@ def upload_file():
 
         chunks = chunk_text(text)
         
-        # Process in smaller batches
         BATCH_SIZE = 10
         total_chunks = len(chunks)
         
@@ -239,7 +248,6 @@ def upload_file():
             )
             document_id = cursor.lastrowid
 
-            # Process chunks in batches
             for i in range(0, total_chunks, BATCH_SIZE):
                 batch_chunks = chunks[i:i + BATCH_SIZE]
                 batch_vectors = embeddings.embed_documents(batch_chunks)
@@ -258,7 +266,6 @@ def upload_file():
                             vector=vector
                         )
 
-                    # Insert chunks into MySQL
                     for j, chunk in enumerate(batch_chunks):
                         chunk_index = i + j
                         cursor.execute(
@@ -289,7 +296,7 @@ def upload_file():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     finally:
-        if os.path.exists(file_path):
+        if file_path and os.path.exists(file_path):
             try:
                 os.remove(file_path)
             except:
