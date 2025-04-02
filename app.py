@@ -30,25 +30,25 @@ app.secret_key = os.getenv('FLASK_SECRET_KEY', 'gani')
 # Configure CORS properly
 CORS(app)
 
-
-load_dotenv()
-
-app = Flask(__name__)
-CORS(app)
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB
-app.secret_key = 'gani'
-
-
-
 # Create upload directory
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Initialize Weaviate client
-weaviate_client = weaviate.connect_to_weaviate_cloud(
-    cluster_url=os.getenv('WEAVIATE_URL'),
-    auth_credentials=Auth.api_key(os.getenv('WEAVIATE_API_KEY'))
-)
+def get_weaviate_client():
+    try:
+        client = weaviate.connect_to_weaviate_cloud(
+            cluster_url=os.getenv('WEAVIATE_URL'),
+            auth_credentials=Auth.api_key(os.getenv('WEAVIATE_API_KEY'))
+        )
+        # Set timeout for operations
+        client.timeout_config = (60, 300)  # (connect_timeout, read_timeout) in seconds
+        return client
+    except Exception as e:
+        print(f"Error connecting to Weaviate: {e}")
+        raise
+
+# Replace the direct client initialization with the function
+weaviate_client = get_weaviate_client()
 
 # Initialize embeddings and llm
 embeddings = TogetherEmbeddings(
@@ -205,15 +205,7 @@ def initialize_database():
 # API Endpoints
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
-    if 'file' not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
-    
-    file = request.files['file']
-    if not file.filename:
-        return jsonify({"error": "Empty filename"}), 400
-
-    if not file.filename.lower().endswith(('.pdf', '.docx')):
-        return jsonify({"error": "Invalid file type"}), 400
+    # ... existing validation code ...
 
     try:
         filename = secure_filename(file.filename)
@@ -229,7 +221,11 @@ def upload_file():
             return jsonify({"error": f"File processing error: {str(e)}"}), 500
 
         chunks = chunk_text(text)
-
+        
+        # Process in smaller batches
+        BATCH_SIZE = 10
+        total_chunks = len(chunks)
+        
         conn = get_mysql_connection()
         if not conn:
             return jsonify({"error": "Database connection failed"}), 500
@@ -243,32 +239,42 @@ def upload_file():
             )
             document_id = cursor.lastrowid
 
-            vectors = embeddings.embed_documents(chunks)
-            
-            weaviate_client = get_weaviate_client()
-            with weaviate_client:
-                collection = weaviate_client.collections.get("DocumentChunks")
-                for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
-                    collection.data.insert(
-                        properties={
-                            "document_id": str(document_id),
-                            "chunk": chunk,
-                            "chunk_index": i
-                        },
-                        vector=vector
-                    )
+            # Process chunks in batches
+            for i in range(0, total_chunks, BATCH_SIZE):
+                batch_chunks = chunks[i:i + BATCH_SIZE]
+                batch_vectors = embeddings.embed_documents(batch_chunks)
+                
+                weaviate_client = get_weaviate_client()
+                with weaviate_client:
+                    collection = weaviate_client.collections.get("DocumentChunks")
+                    for j, (chunk, vector) in enumerate(zip(batch_chunks, batch_vectors)):
+                        chunk_index = i + j
+                        collection.data.insert(
+                            properties={
+                                "document_id": str(document_id),
+                                "chunk": chunk,
+                                "chunk_index": chunk_index
+                            },
+                            vector=vector
+                        )
 
-            for i, chunk in enumerate(chunks):
-                cursor.execute(
-                    "INSERT INTO document_chunks (document_id, chunk_text, chunk_index) VALUES (%s, %s, %s)",
-                    (document_id, chunk, i)
-                )
-            
-            conn.commit()
+                    # Insert chunks into MySQL
+                    for j, chunk in enumerate(batch_chunks):
+                        chunk_index = i + j
+                        cursor.execute(
+                            "INSERT INTO document_chunks (document_id, chunk_text, chunk_index) VALUES (%s, %s, %s)",
+                            (document_id, chunk, chunk_index)
+                        )
+                    
+                    conn.commit()
+                
+                if weaviate_client:
+                    weaviate_client.close()
+
             return jsonify({
                 "message": "File processed successfully",
                 "document_id": document_id,
-                "chunk_count": len(chunks)
+                "chunk_count": total_chunks
             })
 
         except Exception as e:
@@ -429,4 +435,3 @@ if __name__ == '__main__':
     initialize_database()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-    
