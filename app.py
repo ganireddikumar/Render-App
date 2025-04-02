@@ -39,56 +39,23 @@ app.secret_key = 'gani'
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Initialize Weaviate client
-weaviate_client = weaviate.connect_to_weaviate_cloud(
-    cluster_url=os.getenv('WEAVIATE_URL'),
-    auth_credentials=Auth.api_key(os.getenv('WEAVIATE_API_KEY'))
-)
+def get_weaviate_client():
+    return weaviate.connect_to_weaviate_cloud(
+        cluster_url=os.getenv('WEAVIATE_URL'),
+        auth_credentials=Auth.api_key(os.getenv('WEAVIATE_API_KEY'))
+    )
 
-# Initialize Together components
-embeddings = TogetherEmbeddings(
-    model="togethercomputer/m2-bert-80M-32k-retrieval",
-    together_api_key=os.getenv('TOGETHER_API_KEY')
-)
-
-llm = Together(
-    together_api_key=os.getenv('TOGETHER_API_KEY'),
-    model="meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-    temperature=0.1
-)
-
-# MySQL connection helper
 # MySQL connection helper
 def get_mysql_connection():
     try:
-        # Get CA cert from environment variable
-        ca_cert = os.getenv('TIDB_CA_CERT')
-        
-        # Create a temporary file to store the certificate
-        import tempfile
-        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.pem') as temp_cert:
-            temp_cert.write(ca_cert)
-            temp_cert_path = temp_cert.name
-
-        # Updated SSL configuration
-        ssl_config = {
-            'ssl': {
-                'ca': temp_cert_path,
-                'verify_cert': True
-            }
-        }
-        
         conn = mysql.connector.connect(
             host=os.getenv('MYSQL_HOST'),
             port=int(os.getenv('MYSQL_PORT')),
             user=os.getenv('MYSQL_USER'),
             password=os.getenv('MYSQL_PASSWORD'),
             database=os.getenv('MYSQL_DB'),
-            **ssl_config
+            ssl_ca=os.getenv('TIDB_CA_CERT')  # Simplified SSL config
         )
-        
-        # Clean up the temporary file
-        os.unlink(temp_cert_path)
-        
         return conn
     except Error as e:
         print(f"MySQL Error: {e}")
@@ -96,13 +63,127 @@ def get_mysql_connection():
 
 # Document processing functions
 def process_pdf(file_path):
-    with open(file_path, 'rb') as file:
-        pdf_reader = PdfReader(file)
-        return "\n".join([page.extract_text() for page in pdf_reader.pages])
+    try:
+        with open(file_path, 'rb') as file:
+            pdf_reader = PdfReader(file)
+            text = ""
+            for page in pdf_reader.pages:
+                try:
+                    text += page.extract_text() + "\n"
+                except Exception as e:
+                    print(f"Error extracting page: {e}")
+                    continue
+            return text.strip()
+    except Exception as e:
+        print(f"Error processing PDF: {e}")
+        raise Exception("Failed to process PDF file")
 
 def process_docx(file_path):
-    doc = Document(file_path)
-    return "\n".join([para.text for para in doc.paragraphs])
+    try:
+        doc = Document(file_path)
+        text = []
+        for para in doc.paragraphs:
+            if para.text.strip():  # Only add non-empty paragraphs
+                text.append(para.text)
+        return "\n".join(text)
+    except Exception as e:
+        print(f"Error processing DOCX: {e}")
+        raise Exception("Failed to process DOCX file")
+
+# Update the upload endpoint
+@app.route('/api/upload', methods=['POST'])
+def upload_file():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+    
+    file = request.files['file']
+    if not file.filename:
+        return jsonify({"error": "Empty filename"}), 400
+
+    if not file.filename.lower().endswith(('.pdf', '.docx')):
+        return jsonify({"error": "Invalid file type"}), 400
+
+    try:
+        # Save file
+        filename = secure_filename(file.filename)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(file_path)
+
+        # Process document
+        try:
+            if filename.lower().endswith('.pdf'):
+                text = process_pdf(file_path)
+            else:
+                text = process_docx(file_path)
+        except Exception as e:
+            return jsonify({"error": f"File processing error: {str(e)}"}), 500
+
+        # Chunk text
+        chunks = chunk_text(text)
+
+        # Store in MySQL
+        conn = get_mysql_connection()
+        if not conn:
+            return jsonify({"error": "Database connection failed"}), 500
+            
+        cursor = conn.cursor()
+        weaviate_client = None
+        try:
+            # Insert document record
+            cursor.execute(
+                "INSERT INTO documents (filename, file_type) VALUES (%s, %s)",
+                (filename, os.path.splitext(filename)[1])
+            )
+            document_id = cursor.lastrowid
+
+            # Generate embeddings and store in Weaviate
+            vectors = embeddings.embed_documents(chunks)
+            
+            weaviate_client = get_weaviate_client()
+            with weaviate_client:
+                collection = weaviate_client.collections.get("DocumentChunks")
+                for i, (chunk, vector) in enumerate(zip(chunks, vectors)):
+                    collection.data.insert(
+                        properties={
+                            "document_id": str(document_id),
+                            "chunk": chunk,
+                            "chunk_index": i
+                        },
+                        vector=vector
+                    )
+
+            # Store chunks in MySQL
+            for i, chunk in enumerate(chunks):
+                cursor.execute(
+                    "INSERT INTO document_chunks (document_id, chunk_text, chunk_index) VALUES (%s, %s, %s)",
+                    (document_id, chunk, i)
+                )
+            
+            conn.commit()
+            return jsonify({
+                "message": "File processed successfully",
+                "document_id": document_id,
+                "chunk_count": len(chunks)
+            })
+
+        except Exception as e:
+            conn.rollback()
+            return jsonify({"error": str(e)}), 500
+        finally:
+            cursor.close()
+            conn.close()
+            if weaviate_client:
+                weaviate_client.close()
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        # Clean up uploaded file
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except:
+                pass
 
 def chunk_text(text):
     splitter = RecursiveCharacterTextSplitter(
