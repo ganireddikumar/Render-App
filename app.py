@@ -275,76 +275,80 @@ def chat():
         question_embedding = embeddings.embed_query(data['question'])
 
         # Search Weaviate
-        with weaviate_client:
-            collection = weaviate_client.collections.get("DocumentChunks")
-            response = collection.query.near_vector(
-                near_vector=question_embedding,
-                distance=0.85,  # More lenient similarity threshold (changed from 0.7)
-                limit=5,      # Increased number of chunks (changed from 3)
-                filters=Filter.by_property("document_id").equal(str(data['document_id'])),
-                return_properties=["chunk", "chunk_index"]
-            )
-            
-            # Sort chunks by index to maintain document flow
-            sorted_chunks = sorted(response.objects, key=lambda x: x.properties["chunk_index"])
+        weaviate_client = get_weaviate_client()
+        try:
+            with weaviate_client:
+                collection = weaviate_client.collections.get("DocumentChunks")
+                response = collection.query.near_vector(
+                    near_vector=question_embedding,
+                    distance=0.85,
+                    limit=5,
+                    filters=Filter.by_property("document_id").equal(str(data['document_id'])),
+                    return_properties=["chunk", "chunk_index"]
+                )
+                
+                # Sort chunks by index to maintain document flow
+                sorted_chunks = sorted(response.objects, key=lambda x: x.properties["chunk_index"])
 
-            # Extract context from sorted chunks
-            context = "\n\n".join([obj.properties["chunk"] for obj in sorted_chunks])
+                # Extract context from sorted chunks
+                context = "\n\n".join([obj.properties["chunk"] for obj in sorted_chunks])
+        finally:
+            weaviate_client.close()
             
-            # If no relevant context found
-            if not context.strip():
-                return jsonify({"answer": "I don't have enough information to answer that question."})
+        # If no relevant context found
+        if not context.strip():
+            return jsonify({"answer": "I don't have enough information to answer that question."})
 
-            # Generate response using Together.ai
-            prompt = f"""You are a helpful AI assistant analyzing a document. Use the provided context to answer the question thoroughly and accurately. 
+        # Generate response using Together.ai
+        prompt = f"""You are a helpful AI assistant analyzing a document. Use the provided context to answer the question thoroughly and accurately. 
+    
+        Context: {context}
+    
+        Question: {data['question']}
         
-            Context: {context}
+        Instructions:
+        1. Use the information from the provided context to answer the question
+        2. If you can make a reasonable inference from the context, you may do so while indicating it's an inference
+        3. If the context is partially relevant, provide what information you can and explain what's missing
+        4. Only say "I don't have enough information" if the context is completely unrelated to the question
+        5. Keep your answer clear and well-structured
         
-            Question: {data['question']}
-            
-            Instructions:
-            1. Use the information from the provided context to answer the question
-            2. If you can make a reasonable inference from the context, you may do so while indicating it's an inference
-            3. If the context is partially relevant, provide what information you can and explain what's missing
-            4. Only say "I don't have enough information" if the context is completely unrelated to the question
-            5. Keep your answer clear and well-structured
-            
-            Answer: """
-            
-            answer = llm(prompt)
+        Answer: """
+        
+        answer = llm(prompt)
 
-            # Store conversation
-            conn = get_mysql_connection()
-            if conn:
-                cursor = conn.cursor()
-                try:
-                    cursor.execute(
-                        "INSERT INTO conversations (document_id, question, answer) VALUES (%s, %s, %s)",
-                        (data['document_id'], data['question'], answer)
-                    )
-                    conn.commit()
-                except Exception as e:
-                    print(f"Error storing conversation: {str(e)}")
-                finally:
-                    cursor.close()
-                    conn.close()
+        # Store conversation in database
+        conn = get_mysql_connection()
+        if conn:
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    "INSERT INTO conversations (document_id, question, answer) VALUES (%s, %s, %s)",
+                    (data['document_id'], data['question'], answer)
+                )
+                conn.commit()
+            except Exception as db_error:
+                print(f"Error storing conversation: {str(db_error)}")
+            finally:
+                cursor.close()
+                conn.close()
 
-            # Store conversation in session
-            chat_entry = {
-                'document_id': data['document_id'],
-                'question': data['question'],
-                'answer': answer,
-                'timestamp': datetime.now().isoformat()
-            }
-            session['chat_history'].append(chat_entry)
-            
-            return jsonify({
-                "answer": answer,
-                "chat_history": session['chat_history']
-            })
+        # Store conversation in session
+        chat_entry = {
+            'document_id': data['document_id'],
+            'question': data['question'],
+            'answer': answer,
+            'timestamp': datetime.now().isoformat()
+        }
+        session['chat_history'].append(chat_entry)
+        
+        return jsonify({
+            "answer": answer,
+            "chat_history": session['chat_history']
+        })
 
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/api/documents', methods=['GET'])
 def get_documents():
